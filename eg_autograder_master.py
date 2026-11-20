@@ -1,12 +1,14 @@
 """
-Engineering Graphics Auto-Grader — Cloud-Ready Portal (DXF + OpenCV + Gemini VLM + Streamlit)
-=============================================================================================
+Neural Draft — Engineering Graphics Auto-Grader Portal (DXF + OpenCV + Gemini VLM + Streamlit)
+==============================================================================================
 Single self-contained Streamlit web application with:
-  1. Student Submission Tab: Name, U_ID, Email, Scan Upload -> automated grading + instant feedback
-  2. Password-Protected Teacher Dashboard Tab: tabulated rubric gradebook, CSV & Excel (.xlsx)
-     export, side-by-side overlay inspection, faculty mark overrides, and grading/DXF settings
-  3. Borderless DXF + OpenCV engine + optional Gemini VLM notation & Isometric Scale audit
-  4. Persistent SQLite gradebook (works out-of-the-box) + optional Google Sheets cloud sync
+  1. Branded Header: Neural Draft logo (top-left) & RSET logo (top-right)
+  2. Student Submission Tab: Name, U_ID, Email, Scan Upload -> automated grading + clean
+     student-facing interactive overlay, resized original scan below overlay, and rubric breakdown
+     beside it (no OpenCV/VLM engine terminology exposed to students)
+  3. Password-Protected Teacher Dashboard Tab: tabulated rubric gradebook, CSV & Excel (.xlsx)
+     export, interactive OpenCV + VLM spatial annotation viewer, faculty mark overrides, and settings
+  4. Persistent SQLite gradebook + optional Google Sheets cloud sync
 
 Local Install (inside .venv):
     pip install -r requirements.txt
@@ -14,8 +16,9 @@ Local Install (inside .venv):
 Launch Web App:
     streamlit run eg_autograder_master.py
 """
-import time
+
 import argparse
+import base64
 import io
 import json
 import math
@@ -24,6 +27,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,9 +64,11 @@ except ImportError:
 
 try:
     import streamlit as st
+    import streamlit.components.v1 as st_components
     HAS_STREAMLIT = True
 except ImportError:
     HAS_STREAMLIT = False
+    st_components = None
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +109,7 @@ Segment = Tuple[Tuple[float, float], Tuple[float, float]]
 
 
 # ---------------------------------------------------------------------------
-# Secrets & Environment Helpers (Streamlit Cloud + Local Compatible)
+# Secrets, Logo & Environment Helpers (Streamlit Cloud + Local Compatible)
 # ---------------------------------------------------------------------------
 def get_secret(key: str, default: str = "") -> str:
     """Reads a secret from Streamlit Cloud st.secrets first, then OS environment variables."""
@@ -126,6 +132,24 @@ def find_reference_dxf() -> Optional[str]:
         if matches:
             return str(matches[0])
     return None
+
+
+def build_logo_html_tag(stem_or_filename: str, height_px: int = 68) -> str:
+    """Loads a local logo image (supports .png/.jpg/.jpeg) as a base64 HTML <img> tag."""
+    p = BASE_DIR / stem_or_filename
+    if not p.exists():
+        stem = Path(stem_or_filename).stem
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            cand = BASE_DIR / f"{stem}{ext}"
+            if cand.exists():
+                p = cand
+                break
+    if not p.exists():
+        return ""
+    ext_l = p.suffix.lower()
+    mime = "image/jpeg" if ext_l in (".jpg", ".jpeg") else ("image/webp" if ext_l == ".webp" else "image/png")
+    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    return f'<img src="data:{mime};base64,{b64}" style="height:{height_px}px;object-fit:contain;border-radius:6px;" />'
 
 
 def now_ist_str() -> str:
@@ -352,7 +376,6 @@ def build_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Rubric Gradebook")
 
-        # Add a second sheet with class-level summary stats
         if not df.empty:
             summary_df = pd.DataFrame([
                 {"Metric": "Total Submissions", "Value": len(df)},
@@ -407,8 +430,10 @@ def maybe_sync_to_google_sheet(sub_id: int, db_path: Path = DB_PATH) -> Optional
         ws = sh.sheet1
         if not ws.get_all_values():
             ws.append_row(list(row_df.columns))
-        values = ["" if pd.isna(v) else (float(v) if isinstance(v, (np.floating,)) else (int(v) if isinstance(v, (np.integer,)) else v))
-                  for v in row_df.iloc[0].tolist()]
+        values = [
+            "" if pd.isna(v) else (float(v) if isinstance(v, (np.floating,)) else (int(v) if isinstance(v, (np.integer,)) else v))
+            for v in row_df.iloc[0].tolist()
+        ]
         ws.append_row(values)
         return "Synced to Google Sheet"
     except Exception as exc:
@@ -431,7 +456,6 @@ def load_dxf_layers(dxf_path: str) -> Dict[str, List[Segment]]:
             layers.setdefault(lyr, []).append((p1, p2))
         return layers
 
-    # Fallback ASCII R12 DXF LINE parser
     with open(dxf_path, "r", encoding="ascii", errors="ignore") as f:
         raw = [line.strip() for line in f]
     pairs = [(int(raw[i]), raw[i + 1]) for i in range(0, len(raw) - 1, 2)]
@@ -866,7 +890,7 @@ def grade_scan(
     if dim_score_frac < 0.6:
         feedback.append(
             "Dimensioning: Some expected dimension/extension lines were not matched at reference offsets "
-            "(verify numerals, 3:1 arrowheads, and alternate placement via VLM audit)."
+            "(verify numerals, 3:1 arrowheads, and alternate placement)."
         )
     if not feedback:
         feedback.append("Excellent isometric projection: accurate 0.8165 scaling, clean visibility, and complete edges.")
@@ -912,7 +936,7 @@ def grade_scan(
     cv2.line(canvas, (0, banner_h - 1), (canvas.shape[1], banner_h - 1), (200, 200, 200), 1)
     cv2.putText(
         canvas,
-        f"CV Score: {total_marks:.1f}/{max_marks:.1f}  |  Scale: {scale_verdict}",
+        f"Geometry Score: {total_marks:.1f}/{max_marks:.1f}  |  Scale: {scale_verdict}",
         (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (20, 20, 20), 2, cv2.LINE_AA,
     )
     cv2.putText(
@@ -968,7 +992,7 @@ def grade_scan(
                 "matched": dim_hits,
                 "total": len(dim_details),
                 "score_fraction": round(dim_score_frac, 4),
-                "note": "Complementary VLM audit verifies dimension numerals, arrowheads, and Isometric Scale.",
+                "note": "Complementary visual audit verifies dimension numerals, arrowheads, and Isometric Scale.",
             },
         },
         "rubric_marks": marks,
@@ -985,9 +1009,20 @@ def grade_scan(
 
 
 # ===========================================================================
-# PART 3: GEMINI VLM NOTATION & ISOMETRIC SCALE AUDIT
+# PART 3: GEMINI VLM SPATIAL AUDIT (WITH BOUNDING BOX ANNOTATIONS)
 # ===========================================================================
 if HAS_PYDANTIC:
+    class VLMAnnotation(BaseModel):
+        id: str = Field(description="Short unique ID such as 'A1', 'A2', 'A3'.")
+        title: str = Field(description="Concise clickable note title (3-8 words), e.g., 'Isometric Scale 45 deg Label Typo'.")
+        suggestion: str = Field(description="Specific, actionable feedback explaining what is right/wrong at this region.")
+        category: str = Field(description="One of: 'scale', 'dimension', 'geometry', 'neatness'.")
+        box_2d: List[int] = Field(
+            min_length=4,
+            max_length=4,
+            description="[ymin, xmin, ymax, xmax] normalized 0-1000 strictly on Image 2 (the verification overlay).",
+        )
+
     class IsometricScaleAudit(BaseModel):
         present: bool = Field(description="True if a graphical Isometric Scale (30 deg & 45 deg lines) is drawn.")
         has_30_and_45_rays: bool = Field(description="True if both 30 deg and 45 deg rays are drawn and/or labeled.")
@@ -1007,7 +1042,13 @@ if HAS_PYDANTIC:
         dimensioning_and_notation: DimensioningAudit
         neatness_and_line_weights: str = Field(description="Brief comment on line-weight contrast and drawing neatness.")
         combined_student_feedback: List[str] = Field(
-            description="3 to 5 clear, actionable feedback bullets merging OpenCV geometry findings with the visual notation audit."
+            description="3 to 5 clear, actionable student feedback bullets (written naturally without mentioning OpenCV, VLM, AI, or DXF)."
+        )
+        annotations: List[VLMAnnotation] = Field(
+            description=(
+                "3 to 6 spatial annotations pinned to Image 2 (the verification overlay) covering key drawing findings "
+                "(e.g., Isometric Scale construction/labels, existing or missing dimensions, missing prism top face, faint edges)."
+            )
         )
 
 
@@ -1019,7 +1060,7 @@ def run_gemini_vlm_audit(
     cv_report: Dict,
     api_key_override: str = "",
 ) -> Dict:
-    """Calls Gemini via `google-genai` SDK using st.secrets / GEMINI_API_KEY."""
+    """Calls Gemini via `google-genai` SDK with a 20s timeout, fast JPEG prep, and spatial box_2d output."""
     if not HAS_GENAI or not HAS_PYDANTIC:
         raise RuntimeError("Install missing VLM packages: pip install google-genai pydantic")
 
@@ -1071,17 +1112,18 @@ def run_gemini_vlm_audit(
 Problem Statement:
 {problem_statement}
 
-You are given TWO images and a deterministic OpenCV geometric report:
+You are given TWO images and a deterministic geometric measurement report:
 - Image 1: The student's original scanned answer sheet.
-- Image 2: The OpenCV CAD-DXF verification overlay (Green = matched dark edge, Amber = faint edge, Red = missing/misaligned edge, Orange dashed = hidden-edge issue).
+- Image 2: The deskewed verification overlay (includes a top text banner; Green = matched dark edge, Amber = faint edge, Red = missing/misaligned edge, Orange dashed = hidden-edge issue, Blue = reference dimensions).
 
-Deterministic OpenCV Geometric Measurements (TRUST THESE FOR EXACT GEOMETRY & SCALE):
+Deterministic Geometric Measurements (TRUST THESE FOR EXACT GEOMETRY & SCALE):
 {json.dumps(cv_summary, indent=2)}
 
-Inspect what OpenCV cannot reliably judge on Image 1, grounded in Image 2 and the JSON above:
+Inspect Image 1 grounded in Image 2 and the measurements above:
 1. Isometric Scale Construction (0.0 to 1.5 marks): Check if the student drew a graphical isometric scale (30 deg & 45 deg lines, vertical projections, and requisite markings such as 40, 50, 60 / Iso 40, Iso 50, Iso 60). Note any labeling errors (e.g., 75 deg instead of 45 deg).
 2. Dimensioning, Arrowheads & Labeling (0.0 to 1.0 marks): Check handwritten dimension numerals on the solid (expected: cube 60, prism base 40, prism height 50; 'Iso 60' style is acceptable if consistent), 3:1 filled arrowheads, title ('Isometric Projection'), and corner labels.
-3. Synthesize 3-5 concise, constructive student feedback bullets combining both OpenCV geometric defects and your notation/scale audit.
+3. Synthesize 3-5 concise, constructive student feedback bullets combining both geometric defects and notation/scale review. Write directly to the student as a professor; DO NOT mention "OpenCV", "VLM", "DXF", or "overlay" in student-facing notes or suggestions.
+4. Spatial Annotations (`annotations`): Return 3 to 6 localized findings with `id` ('A1', 'A2', ...), short `title`, actionable `suggestion`, `category` ('scale', 'dimension', 'geometry', or 'neatness'), and `box_2d` in normalized [ymin, xmin, ymax, xmax] integers (0 to 1000) measured STRICTLY on Image 2 (including its top banner height). Place boxes tightly around the relevant region on Image 2.
 
 Return strictly valid JSON matching the requested schema.
 """
@@ -1143,7 +1185,537 @@ def compute_hybrid_rubric(cv_report: Dict, vlm_dict: Optional[Dict]) -> Dict:
 
 
 # ===========================================================================
-# PART 4: STREAMLIT PORTAL (STUDENT SUBMISSION TAB + TEACHER DASHBOARD TAB)
+# PART 4: INTERACTIVE CLICK-TO-HIGHLIGHT SVG OVERLAY VIEWER
+# ===========================================================================
+def sanitize_annotations(raw_annotations: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Validates and normalizes Gemini box_2d [ymin, xmin, ymax, xmax] coordinates (0..1000)."""
+    clean: List[Dict[str, Any]] = []
+    valid_cats = {"scale", "dimension", "geometry", "neatness"}
+    for idx, item in enumerate(raw_annotations or [], start=1):
+        box = item.get("box_2d")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            y0, x0, y1, x1 = [int(round(float(v))) for v in box]
+        except Exception:
+            continue
+        y0, y1 = sorted((max(0, min(1000, y0)), max(0, min(1000, y1))))
+        x0, x1 = sorted((max(0, min(1000, x0)), max(0, min(1000, x1))))
+        if y1 - y0 < 25:
+            mid = (y0 + y1) // 2
+            y0, y1 = max(0, mid - 14), min(1000, mid + 14)
+        if x1 - x0 < 25:
+            mid = (x0 + x1) // 2
+            x0, x1 = max(0, mid - 14), min(1000, mid + 14)
+
+        cat = str(item.get("category", "geometry")).lower().strip()
+        if cat not in valid_cats:
+            cat = "geometry"
+        clean.append({
+            "id": str(item.get("id") or f"A{idx}").strip(),
+            "title": str(item.get("title") or f"Finding {idx}").strip(),
+            "suggestion": str(item.get("suggestion") or "").strip(),
+            "category": cat,
+            "box_2d": [y0, x0, y1, x1],
+        })
+    return clean
+
+
+def build_interactive_overlay_html(
+    overlay_bytes: bytes,
+    vlm_dict: Dict[str, Any],
+    student_mode: bool = False,
+) -> Tuple[str, int]:
+    """
+    Self-contained HTML + SVG + JS viewer that overlays spatial boxes onto the graded overlay image.
+    Clicking any note hyperlink isolates ONLY that annotation on the figure (no Streamlit rerun).
+    When student_mode=True, all OpenCV / VLM engine labels are replaced with neutral student wording.
+    """
+    with Image.open(io.BytesIO(overlay_bytes)) as im:
+        img_w, img_h = im.size
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, format="PNG", optimize=True)
+        b64_img = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    annotations = sanitize_annotations(vlm_dict.get("annotations", []))
+    iso_a = vlm_dict.get("isometric_scale", {})
+    dim_a = vlm_dict.get("dimensioning_and_notation", {})
+
+    payload = {
+        "img_w": img_w,
+        "img_h": img_h,
+        "annotations": annotations,
+        "iso_scale": {
+            "present": bool(iso_a.get("present", False)),
+            "has_30_and_45_rays": bool(iso_a.get("has_30_and_45_rays", False)),
+            "lengths": list(iso_a.get("requisite_lengths_marked", [])),
+            "score": iso_a.get("score_out_of_1_5", 0.0),
+            "notes": str(iso_a.get("notes", "")),
+        },
+        "dimensioning": {
+            "found": list(dim_a.get("dimensions_found", [])),
+            "missing": list(dim_a.get("missing_dimensions", [])),
+            "arrowheads": str(dim_a.get("arrowheads_and_conventions", "")),
+            "score": dim_a.get("score_out_of_1_0", 0.0),
+            "notes": str(dim_a.get("notes", "")),
+        },
+        "neatness": str(vlm_dict.get("neatness_and_line_weights", "")),
+    }
+
+    safe_json = json.dumps(payload).replace("</", "<\\/")
+
+    aspect = img_h / max(1, img_w)
+    est_height = int(max(640, min(980, 560 * aspect + 140)))
+
+    toolbar_title = "Annotated Evaluation Overlay" if student_mode else "Interactive Verification Overlay (OpenCV + VLM Annotations)"
+    hide_btn_label = "Hide Highlights" if student_mode else "Hide VLM Boxes"
+    hide_status_txt = "Highlights hidden" if student_mode else "VLM boxes hidden"
+    notes_heading = "Evaluation Notes (Click to Highlight)" if student_mode else "VLM Audit Notes (Click to Highlight)"
+    line_legend_lbl = "Line Legend:" if student_mode else "OpenCV Lines:"
+    box_legend_lbl = "Highlight Boxes:" if student_mode else "VLM Boxes:"
+    iso_audit_heading = "Isometric Scale Review" if student_mode else "Isometric Scale Audit (Gemini VLM)"
+    dim_audit_heading = "Dimensioning & Notation Review" if student_mode else "Dimensioning & Notation Audit (Gemini VLM)"
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+  body {{ margin: 0; padding: 6px; background: transparent; color: #1e293b; }}
+  .wrap {{
+    display: grid;
+    grid-template-columns: minmax(320px, 1.45fr) minmax(280px, 1fr);
+    gap: 16px;
+    align-items: start;
+  }}
+  @media (max-width: 820px) {{
+    .wrap {{ grid-template-columns: 1fr; }}
+  }}
+  .panel {{
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  }}
+  .toolbar {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+  }}
+  .toolbar-title {{ font-size: 14px; font-weight: 700; color: #0f172a; }}
+  .btn-group {{ display: flex; gap: 6px; }}
+  .ctrl-btn {{
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #334155;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }}
+  .ctrl-btn:hover {{ background: #e2e8f0; }}
+  .ctrl-btn.active {{ background: #1d4ed8; color: #ffffff; border-color: #1d4ed8; }}
+  .stage {{
+    position: relative;
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #ffffff;
+  }}
+  .stage img {{
+    display: block;
+    width: 100%;
+    height: auto;
+    user-select: none;
+  }}
+  .stage svg {{
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }}
+  .anno-group {{ cursor: pointer; transition: opacity 0.18s ease; }}
+  .anno-rect {{ transition: stroke-width 0.15s ease, fill-opacity 0.15s ease; }}
+  .active-callout {{
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border-left: 4px solid #2563eb;
+    background: #eff6ff;
+    font-size: 13px;
+    line-height: 1.45;
+    display: none;
+  }}
+  .active-callout.visible {{ display: block; }}
+  .active-callout-title {{ font-weight: 700; margin-bottom: 3px; color: #0f172a; }}
+  .legend-bar {{
+    margin-top: 8px;
+    font-size: 11.5px;
+    color: #475569;
+    line-height: 1.4;
+  }}
+  .section-head {{
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #0f172a;
+    margin: 0 0 8px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }}
+  .hint {{ font-size: 11.5px; color: #64748b; font-weight: 400; }}
+  .note-list {{ display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }}
+  .note-card {{
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 9px 11px;
+    background: #f8fafc;
+    transition: all 0.15s ease;
+  }}
+  .note-card:hover {{ border-color: #94a3b8; background: #f1f5f9; }}
+  .note-card.selected {{
+    border-color: #2563eb;
+    background: #eff6ff;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+  }}
+  .note-header {{
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+  }}
+  .badge {{
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    color: #ffffff;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }}
+  .cat-pill {{
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+  }}
+  .note-link {{
+    font-size: 13px;
+    font-weight: 700;
+    color: #1d4ed8;
+    text-decoration: underline;
+    cursor: pointer;
+  }}
+  .note-link:hover {{ color: #1e40af; }}
+  .note-body {{
+    font-size: 12.5px;
+    color: #334155;
+    line-height: 1.4;
+    margin: 0;
+  }}
+  .audit-box {{
+    border-top: 1px solid #e2e8f0;
+    padding-top: 10px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    line-height: 1.45;
+  }}
+  .audit-box h4 {{
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #0f172a;
+    margin: 0 0 4px 0;
+  }}
+  .audit-box p {{ margin: 3px 0; color: #334155; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <div class="toolbar">
+      <div class="toolbar-title">{toolbar_title}</div>
+      <div class="btn-group">
+        <button id="btn-show-all" class="ctrl-btn active" type="button">Show All</button>
+        <button id="btn-hide-all" class="ctrl-btn" type="button">{hide_btn_label}</button>
+      </div>
+    </div>
+    <div class="stage">
+      <img id="overlay-img" src="data:image/png;base64,{b64_img}" alt="Graded Overlay" />
+      <svg id="anno-svg" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div id="active-callout" class="active-callout">
+      <div id="callout-title" class="active-callout-title"></div>
+      <div id="callout-body"></div>
+    </div>
+    <div class="legend-bar">
+      <strong>{line_legend_lbl}</strong> Green = Matched dark edge &bull; Amber = Faint edge &bull; Red = Missing/misaligned &bull; Orange dashed = Hidden-edge issue &bull; Blue = Dimensions<br/>
+      <strong>{box_legend_lbl}</strong> Purple = Isometric Scale &bull; Blue = Dimensioning &bull; Red = Geometry &bull; Amber = Neatness
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="section-head">
+      <span>{notes_heading}</span>
+      <span class="hint" id="mode-status">Showing all</span>
+    </div>
+    <div id="note-list" class="note-list"></div>
+    <div id="audit-summary" class="audit-box"></div>
+  </div>
+</div>
+
+<script>
+(function() {{
+  const DATA = {safe_json};
+  const COLORS = {{
+    scale: "#9333ea",
+    dimension: "#2563eb",
+    geometry: "#dc2626",
+    neatness: "#d97706"
+  }};
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("anno-svg");
+  const noteList = document.getElementById("note-list");
+  const callout = document.getElementById("active-callout");
+  const calloutTitle = document.getElementById("callout-title");
+  const calloutBody = document.getElementById("callout-body");
+  const modeStatus = document.getElementById("mode-status");
+  const btnShowAll = document.getElementById("btn-show-all");
+  const btnHideAll = document.getElementById("btn-hide-all");
+
+  const W = DATA.img_w;
+  const H = DATA.img_h;
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+  const strokeBase = Math.max(2.5, Math.min(W, H) * 0.0042);
+  const badgeFont = Math.max(12, Math.min(W, H) * 0.018);
+  const badgeH = badgeFont * 1.45;
+
+  let activeId = null;
+  const svgGroups = {{}};
+  const noteCards = {{}};
+
+  function renderState() {{
+    btnShowAll.classList.toggle("active", activeId === null);
+    btnHideAll.classList.toggle("active", activeId === "__NONE__");
+
+    if (activeId === null) {{
+      modeStatus.textContent = "Showing all (" + DATA.annotations.length + ")";
+    }} else if (activeId === "__NONE__") {{
+      modeStatus.textContent = "{hide_status_txt}";
+    }} else {{
+      modeStatus.textContent = "Highlighting " + activeId + " only";
+    }}
+
+    let activeAnno = null;
+    for (const a of DATA.annotations) {{
+      const g = svgGroups[a.id];
+      const card = noteCards[a.id];
+      const rect = g.querySelector("rect.anno-rect");
+      const isSelected = (activeId === a.id);
+
+      if (activeId === null) {{
+        g.style.display = "inline";
+        g.style.opacity = "0.92";
+        rect.setAttribute("stroke-width", strokeBase.toFixed(1));
+        rect.setAttribute("fill-opacity", "0.10");
+      }} else if (isSelected) {{
+        g.style.display = "inline";
+        g.style.opacity = "1.0";
+        rect.setAttribute("stroke-width", (strokeBase * 1.85).toFixed(1));
+        rect.setAttribute("fill-opacity", "0.20");
+        svg.appendChild(g);
+        activeAnno = a;
+      }} else {{
+        g.style.display = "none";
+      }}
+
+      if (card) {{
+        card.classList.toggle("selected", isSelected);
+      }}
+    }}
+
+    if (activeAnno) {{
+      const col = COLORS[activeAnno.category] || COLORS.geometry;
+      callout.style.borderLeftColor = col;
+      calloutTitle.textContent = "[" + activeAnno.id + "] " + activeAnno.title;
+      calloutBody.textContent = activeAnno.suggestion;
+      callout.classList.add("visible");
+    }} else {{
+      callout.classList.remove("visible");
+    }}
+  }}
+
+  function selectAnnotation(id) {{
+    activeId = (activeId === id) ? null : id;
+    renderState();
+  }}
+
+  btnShowAll.addEventListener("click", function() {{
+    activeId = null;
+    renderState();
+  }});
+
+  btnHideAll.addEventListener("click", function() {{
+    activeId = "__NONE__";
+    renderState();
+  }});
+
+  if (!DATA.annotations.length) {{
+    const emptyMsg = document.createElement("div");
+    emptyMsg.className = "note-body";
+    emptyMsg.textContent = "No localized annotations were returned for this submission.";
+    noteList.appendChild(emptyMsg);
+  }}
+
+  for (const a of DATA.annotations) {{
+    const color = COLORS[a.category] || COLORS.geometry;
+    const [y0n, x0n, y1n, x1n] = a.box_2d;
+    const x = (x0n / 1000.0) * W;
+    const y = (y0n / 1000.0) * H;
+    const bw = Math.max(12, ((x1n - x0n) / 1000.0) * W);
+    const bh = Math.max(12, ((y1n - y0n) / 1000.0) * H);
+
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("class", "anno-group");
+    g.addEventListener("click", function(ev) {{
+      ev.stopPropagation();
+      selectAnnotation(a.id);
+    }});
+
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("class", "anno-rect");
+    rect.setAttribute("x", x.toFixed(1));
+    rect.setAttribute("y", y.toFixed(1));
+    rect.setAttribute("width", bw.toFixed(1));
+    rect.setAttribute("height", bh.toFixed(1));
+    rect.setAttribute("rx", "6");
+    rect.setAttribute("fill", color);
+    rect.setAttribute("fill-opacity", "0.10");
+    rect.setAttribute("stroke", color);
+    rect.setAttribute("stroke-width", strokeBase.toFixed(1));
+    g.appendChild(rect);
+
+    const pillW = Math.max(badgeFont * 2.1, (a.id.length + 1) * badgeFont * 0.78);
+    const pillY = (y - badgeH >= 2) ? (y - badgeH) : y;
+    const pill = document.createElementNS(SVG_NS, "rect");
+    pill.setAttribute("x", x.toFixed(1));
+    pill.setAttribute("y", pillY.toFixed(1));
+    pill.setAttribute("width", pillW.toFixed(1));
+    pill.setAttribute("height", badgeH.toFixed(1));
+    pill.setAttribute("rx", "4");
+    pill.setAttribute("fill", color);
+    g.appendChild(pill);
+
+    const lbl = document.createElementNS(SVG_NS, "text");
+    lbl.setAttribute("x", (x + pillW / 2.0).toFixed(1));
+    lbl.setAttribute("y", (pillY + badgeH * 0.72).toFixed(1));
+    lbl.setAttribute("text-anchor", "middle");
+    lbl.setAttribute("fill", "#ffffff");
+    lbl.setAttribute("font-size", badgeFont.toFixed(1));
+    lbl.setAttribute("font-weight", "700");
+    lbl.textContent = a.id;
+    g.appendChild(lbl);
+
+    svg.appendChild(g);
+    svgGroups[a.id] = g;
+
+    const card = document.createElement("div");
+    card.className = "note-card";
+
+    const hdr = document.createElement("div");
+    hdr.className = "note-header";
+
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.style.backgroundColor = color;
+    badge.textContent = a.id;
+
+    const link = document.createElement("a");
+    link.href = "#";
+    link.className = "note-link";
+    link.textContent = a.title;
+    link.addEventListener("click", function(ev) {{
+      ev.preventDefault();
+      selectAnnotation(a.id);
+    }});
+
+    const cat = document.createElement("span");
+    cat.className = "cat-pill";
+    cat.textContent = a.category;
+
+    hdr.appendChild(badge);
+    hdr.appendChild(link);
+    hdr.appendChild(cat);
+
+    const body = document.createElement("p");
+    body.className = "note-body";
+    body.textContent = a.suggestion;
+
+    card.appendChild(hdr);
+    card.appendChild(body);
+    noteList.appendChild(card);
+    noteCards[a.id] = card;
+  }}
+
+  const sumEl = document.getElementById("audit-summary");
+  function addAuditBlock(heading, lines) {{
+    const h = document.createElement("h4");
+    h.textContent = heading;
+    sumEl.appendChild(h);
+    for (const line of lines) {{
+      const p = document.createElement("p");
+      p.textContent = line;
+      sumEl.appendChild(p);
+    }}
+  }}
+
+  addAuditBlock("{iso_audit_heading} (" + DATA.iso_scale.score + " / 1.5)", [
+    "Present: " + (DATA.iso_scale.present ? "Yes" : "No") + " | 30 & 45 deg rays: " + (DATA.iso_scale.has_30_and_45_rays ? "Yes" : "No"),
+    "Marked lengths: " + (DATA.iso_scale.lengths.length ? DATA.iso_scale.lengths.join(", ") : "None detected"),
+    "Notes: " + DATA.iso_scale.notes
+  ]);
+
+  const spacer = document.createElement("div");
+  spacer.style.height = "8px";
+  sumEl.appendChild(spacer);
+
+  addAuditBlock("{dim_audit_heading} (" + DATA.dimensioning.score + " / 1.0)", [
+    "Observed: " + (DATA.dimensioning.found.length ? DATA.dimensioning.found.join(", ") : "None detected"),
+    "Missing: " + (DATA.dimensioning.missing.length ? DATA.dimensioning.missing.join(", ") : "None"),
+    "Arrowheads: " + DATA.dimensioning.arrowheads,
+    "Notes: " + DATA.dimensioning.notes
+  ]);
+
+  if (DATA.neatness) {{
+    const pNeat = document.createElement("p");
+    pNeat.style.marginTop = "8px";
+    pNeat.style.color = "#64748b";
+    pNeat.textContent = "Line weights & neatness: " + DATA.neatness;
+    sumEl.appendChild(pNeat);
+  }}
+
+  renderState();
+}})();
+</script>
+</body>
+</html>"""
+
+    return html_doc, est_height
+
+
+# ===========================================================================
+# PART 5: STREAMLIT PORTAL (STUDENT SUBMISSION TAB + TEACHER DASHBOARD TAB)
 # ===========================================================================
 def render_result_details(
     orig_bytes: bytes,
@@ -1152,8 +1724,14 @@ def render_result_details(
     vlm_dict: Optional[Dict],
     rubric: Dict,
     approved_marks: Optional[float] = None,
+    student_mode: bool = False,
 ) -> None:
-    """Reusable visual report renderer for both Student feedback and Teacher inspection."""
+    """
+    Reusable visual report renderer:
+      - Row 1: Overlay (1.45 left) + Evaluation/VLM Audit Notes (1.0 right)
+      - Row 2: Original Scan resized to match overlay width (1.45 left) + Rubric Breakdown (1.0 right)
+      - student_mode=True hides all OpenCV / VLM / DXF / Gemini engine mentions.
+    """
     c1, c2, c3, c4 = st.columns(4)
     display_score = approved_marks if approved_marks is not None else rubric["total"]
     c1.metric("Score", f"{display_score:.2f} / {rubric['max']:.1f}")
@@ -1168,42 +1746,73 @@ def render_result_details(
     prism_p = cv_rep["layer_results"]["VISIBLE_PRISM"]["passed"]
     c4.metric("Dark Visible Edges", f"{cube_p + prism_p} / 18", f"Cube {cube_p}/9 | Prism {prism_p}/9")
 
-    col_orig, col_over = st.columns(2)
-    with col_orig:
-        st.markdown("**Original Scanned Sheet**")
-        st.image(orig_bytes, use_container_width=True)
-    with col_over:
-        st.markdown("**OpenCV CAD Verification Overlay**")
-        st.image(overlay_bytes, use_container_width=True)
-        st.caption("Green = Dark edge matched | Amber = Faint edge | Red = Missing/misaligned | Orange dashed = Hidden-edge issue | Blue = Dimension lines")
+    # Resize original scan to match overlay pixel width while preserving aspect ratio
+    with Image.open(io.BytesIO(overlay_bytes)) as ov_im, Image.open(io.BytesIO(orig_bytes)) as or_im:
+        target_w = ov_im.width
+        new_h = max(1, int(round(or_im.height * (target_w / max(1, or_im.width)))))
+        or_resized = or_im.convert("RGB").resize((target_w, new_h), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        or_resized.save(buf, format="PNG")
+        orig_display_bytes = buf.getvalue()
 
-    st.markdown("**Rubric Breakdown**")
-    st.table(rubric["rows"])
+    has_interactive = bool(vlm_dict and sanitize_annotations(vlm_dict.get("annotations", [])) and st_components is not None)
 
-    if vlm_dict:
-        col_s, col_d = st.columns(2)
-        with col_s:
-            st.markdown("**Isometric Scale Audit (Gemini VLM)**")
-            iso_a = vlm_dict["isometric_scale"]
-            st.write(f"- **Present:** {'Yes' if iso_a['present'] else 'No'} | **30° & 45° Rays:** {'Yes' if iso_a['has_30_and_45_rays'] else 'No'}")
-            st.write(f"- **Marked Lengths:** {', '.join(iso_a['requisite_lengths_marked']) or 'None detected'}")
-            st.write(f"- **Notes:** {iso_a['notes']}")
-        with col_d:
-            st.markdown("**Dimensioning & Notation Audit (Gemini VLM)**")
-            dim_a = vlm_dict["dimensioning_and_notation"]
-            st.write(f"- **Observed Dimensions:** {', '.join(dim_a['dimensions_found']) or 'None detected'}")
-            st.write(f"- **Missing Dimensions:** {', '.join(dim_a['missing_dimensions']) or 'None'}")
-            st.write(f"- **Arrowheads & Conventions:** {dim_a['arrowheads_and_conventions']}")
-            st.write(f"- **Notes:** {dim_a['notes']}")
-
-        st.markdown("**Actionable Feedback**")
-        for bullet in vlm_dict["combined_student_feedback"]:
-            st.markdown(f"- {bullet}")
-        st.caption(f"Line weights & neatness: {vlm_dict['neatness_and_line_weights']}")
+    # Row 1: Overlay (1.45fr left) + Audit Notes (1fr right)
+    if has_interactive:
+        html_doc, viewer_height = build_interactive_overlay_html(overlay_bytes, vlm_dict, student_mode=student_mode)
+        st_components.html(html_doc, height=viewer_height, scrolling=True)
     else:
-        st.markdown("**Geometric Feedback (OpenCV)**")
-        for bullet in cv_rep["feedback"]:
-            st.markdown(f"- {bullet}")
+        top_l, top_r = st.columns([1.45, 1.0], gap="medium")
+        with top_l:
+            with st.container(border=True):
+                st.markdown("**Graded Drawing Overlay**" if student_mode else "**OpenCV CAD Verification Overlay**")
+                st.image(overlay_bytes, use_container_width=True)
+                st.caption("Green = Dark edge matched | Amber = Faint edge | Red = Missing/misaligned | Orange dashed = Hidden-edge issue | Blue = Dimension lines")
+        with top_r:
+            with st.container(border=True):
+                if vlm_dict:
+                    st.markdown("**Isometric Scale Review**" if student_mode else "**Isometric Scale Audit (Gemini VLM)**")
+                    iso_a = vlm_dict["isometric_scale"]
+                    st.write(f"- **Present:** {'Yes' if iso_a['present'] else 'No'} | **30° & 45° Rays:** {'Yes' if iso_a['has_30_and_45_rays'] else 'No'}")
+                    st.write(f"- **Marked Lengths:** {', '.join(iso_a['requisite_lengths_marked']) or 'None detected'}")
+                    st.write(f"- **Notes:** {iso_a['notes']}")
+
+                    st.markdown("**Dimensioning & Notation Review**" if student_mode else "**Dimensioning & Notation Audit (Gemini VLM)**")
+                    dim_a = vlm_dict["dimensioning_and_notation"]
+                    st.write(f"- **Observed Dimensions:** {', '.join(dim_a['dimensions_found']) or 'None detected'}")
+                    st.write(f"- **Missing Dimensions:** {', '.join(dim_a['missing_dimensions']) or 'None'}")
+                    st.write(f"- **Arrowheads & Conventions:** {dim_a['arrowheads_and_conventions']}")
+                    st.write(f"- **Notes:** {dim_a['notes']}")
+                else:
+                    st.markdown("**Evaluation Feedback**" if student_mode else "**Geometric Feedback (OpenCV)**")
+                    for bullet in cv_rep["feedback"]:
+                        clean_b = (
+                            bullet.replace(" (verify numerals, 3:1 arrowheads, and alternate placement via VLM audit)", "")
+                            if student_mode else bullet
+                        )
+                        st.markdown(f"- {clean_b}")
+
+    # Hide the "Engine" column ("OpenCV + DXF" / "Gemini VLM") in the student rubric table only
+    rubric_rows = (
+        [{k: v for k, v in r.items() if k != "Engine"} for r in rubric["rows"]]
+        if student_mode else rubric["rows"]
+    )
+
+    # Row 2: Resized Original Scan directly below Overlay (1.45 left) + Rubric Breakdown (1.0 right)
+    bot_l, bot_r = st.columns([1.45, 1.0], gap="medium")
+    with bot_l:
+        with st.container(border=True):
+            st.markdown("**Original Scanned Sheet**")
+            st.image(orig_display_bytes, use_container_width=True)
+    with bot_r:
+        with st.container(border=True):
+            st.markdown("**Rubric Breakdown**")
+            st.table(rubric_rows)
+
+            if vlm_dict:
+                st.markdown("**Actionable Feedback Summary**")
+                for bullet in vlm_dict["combined_student_feedback"]:
+                    st.markdown(f"- {bullet}")
 
 
 def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> None:
@@ -1211,7 +1820,7 @@ def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
     st.info(f"**Assignment Question:** {settings['problem_statement']}")
 
     if not dxf_path:
-        st.error("No reference CAD key (`.dxf`) is configured yet. Ask faculty to upload one in the Teacher Dashboard.")
+        st.error("No reference drawing key is configured yet. Ask faculty to upload one in the Teacher Dashboard.")
         return
 
     with st.form("student_submission_form", clear_on_submit=False):
@@ -1271,7 +1880,7 @@ def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
             else:
                 cv_kwargs["unknown_dpi"] = True
 
-            with st.spinner("Step 1/2: Aligning your scan to the CAD reference key & verifying geometry..."):
+            with st.spinner("Step 1/2: Checking drawing alignment, scale & geometry..."):
                 try:
                     cv_report = grade_scan(**cv_kwargs)
                 except Exception as exc:
@@ -1282,7 +1891,7 @@ def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
             vlm_warning = None
             if settings.get("enable_vlm", True):
                 api_override = st.session_state.get("session_api_key_override", "")
-                with st.spinner("Step 2/2: Auditing Isometric Scale & dimensioning with Gemini VLM..."):
+                with st.spinner("Step 2/2: Reviewing isometric scale, dimensioning & annotations..."):
                     try:
                         vlm_dict = run_gemini_vlm_audit(
                             model_id=settings.get("model_id", "gemini-3.8-flash"),
@@ -1292,8 +1901,8 @@ def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
                             cv_report=cv_report,
                             api_key_override=api_override,
                         )
-                    except Exception as exc:
-                        vlm_warning = f"VLM notation audit unavailable ({exc}); graded using OpenCV geometry engine."
+                    except Exception:
+                        vlm_warning = "Detailed notation review is temporarily unavailable; graded on drawing geometry."
 
             overlay_bytes = Path(overlay_path).read_bytes()
             rubric = compute_hybrid_rubric(cv_report, vlm_dict)
@@ -1341,6 +1950,7 @@ def render_student_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
                 cv_rep=res["cv_report"],
                 vlm_dict=res["vlm_dict"],
                 rubric=res["rubric"],
+                student_mode=True,
             )
             st.download_button(
                 "Download Your Annotated Feedback Sheet (PNG)",
@@ -1372,7 +1982,6 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
                 st.error("Incorrect password.")
         return
 
-    # Logged-in header bar
     top_l, top_r = st.columns([5, 1])
     if using_default_pwd:
         top_l.warning("Using default password (`faculty123`). Set `TEACHER_PASSWORD` in Streamlit Secrets for production.")
@@ -1382,9 +1991,7 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
         st.session_state["teacher_authenticated"] = False
         st.rerun()
 
-    # -----------------------------------------------------------------------
     # 1. Tabulated Gradebook & Export
-    # -----------------------------------------------------------------------
     df = fetch_gradebook_df()
 
     k1, k2, k3, k4 = st.columns(4)
@@ -1424,9 +2031,7 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
             use_container_width=True,
         )
 
-        # -------------------------------------------------------------------
         # 2. Individual Student Inspection & Faculty Override
-        # -------------------------------------------------------------------
         st.divider()
         st.markdown("### Inspect Student Sheet & Faculty Override")
         options = {
@@ -1449,6 +2054,7 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
                 vlm_dict=detail["vlm_audit"],
                 rubric=detail["rubric"],
                 approved_marks=detail["approved_marks"],
+                student_mode=False,
             )
 
             with st.form(f"override_form_{sub_id}"):
@@ -1497,9 +2103,7 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
                 st.warning(f"Deleted Submission #{sub_id}.")
                 st.rerun()
 
-    # -----------------------------------------------------------------------
     # 3. Grading Configuration & Reference Key (Teacher-Only)
-    # -----------------------------------------------------------------------
     st.divider()
     with st.expander("Assignment & Grading Engine Settings", expanded=False):
         st.caption(f"**Active Reference DXF:** `{dxf_path or 'None found'}`")
@@ -1557,13 +2161,19 @@ def render_teacher_tab(settings: Dict[str, Any], dxf_path: Optional[str]) -> Non
 
 
 def render_streamlit_app() -> None:
-    st.set_page_config(page_title="EG Auto-Grader Portal", layout="wide")
+    st.set_page_config(page_title="Neural Draft | EG Auto-Grader", layout="wide")
     init_db()
     settings = load_settings()
     dxf_path = find_reference_dxf()
 
-    st.title("Engineering Graphics Auto-Grader Portal")
-    st.caption("Hybrid CAD-DXF + OpenCV geometric verification & Gemini VLM notation audit")
+    # Top header: Neural Draft app logo (left) and RSET logo (right)
+    st.markdown(
+        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">'
+        f'<div>{build_logo_html_tag("neural_draft_logo.png", 68)}</div>'
+        f'<div>{build_logo_html_tag("rset_logo.png", 68)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     tab_student, tab_teacher = st.tabs(["Student Submission", "Teacher Dashboard"])
     with tab_student:
@@ -1618,5 +2228,4 @@ elif __name__ == "__main__":
     if len(sys.argv) > 1:
         run_cli()
     else:
-        # Clicking VS Code's Play button launches the Streamlit web app automatically
         subprocess.run([sys.executable, "-m", "streamlit", "run", str(Path(__file__).resolve())])
