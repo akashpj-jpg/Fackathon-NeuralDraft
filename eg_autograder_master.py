@@ -2169,8 +2169,8 @@ def render_streamlit_app() -> None:
     # Top header: Neural Draft app logo (left) and RSET logo (right)
     st.markdown(
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">'
-        f'<div>{build_logo_html_tag("neural_draft_logo.png", 68)}</div>'
-        f'<div>{build_logo_html_tag("rset_logo.png", 68)}</div>'
+        f'<div>{build_logo_html_tag("neural_draft_logo.png", 150)}</div>'
+        f'<div>{build_logo_html_tag("rset_logo.png", 150)}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
