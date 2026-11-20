@@ -2167,10 +2167,21 @@ def render_streamlit_app() -> None:
     dxf_path = find_reference_dxf()
 
     # Top header: Neural Draft app logo (left) and RSET logo (right)
+    # Top header: Cropped app icon + title/description (left) and RSET logo (right)
     st.markdown(
-        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">'
-        f'<div>{build_logo_html_tag("neural_draft_logo.png", 150)}</div>'
-        f'<div>{build_logo_html_tag("rset_logo.png", 150)}</div>'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;">'
+        f'  <div style="display:flex;align-items:center;gap:14px;">'
+        f'    {build_logo_html_tag("neural_draft_logo.png", 150)}'
+        f'    <div style="line-height:1.2;">'
+        f'      <div style="font-size:28px;font-weight:800;letter-spacing:0.6px;margin:0;">'
+        f'        <span>NEURAL</span> <span style="color:#14b8a6;">DRAFT</span>'
+        f'      </div>'
+        f'      <div style="font-size:12.5px;font-weight:600;letter-spacing:1.4px;opacity:0.75;margin-top:3px;">'
+        f'        ENGINEERING GRAPHICS AUTO-GRADER'
+        f'      </div>'
+        f'    </div>'
+        f'  </div>'
+        f'  <div>{build_logo_html_tag("rset_logo.png", 150)}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
