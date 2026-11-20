@@ -1027,11 +1027,21 @@ def run_gemini_vlm_audit(
     if not key:
         raise RuntimeError("GEMINI_API_KEY not found in Streamlit Secrets or environment variables.")
 
-    client = genai.Client(api_key=key)
+    def _prep_vlm_jpeg(path: str, max_dim: int = 1200) -> bytes:
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((max_dim, max_dim))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85)
+            return buf.getvalue()
 
-    orig_bytes = Path(original_scan_path).read_bytes()
-    overlay_bytes = Path(overlay_path).read_bytes()
-    orig_mime = "image/png" if original_scan_path.lower().endswith(".png") else "image/jpeg"
+    client = genai.Client(
+        api_key=key,
+        http_options=genai_types.HttpOptions(timeout=20_000),
+    )
+
+    orig_bytes = _prep_vlm_jpeg(original_scan_path)
+    overlay_bytes = _prep_vlm_jpeg(overlay_path)
 
     cv_summary = {
         "scale_detection": cv_report["scale_detection"]["verdict"],
@@ -1076,34 +1086,32 @@ Inspect what OpenCV cannot reliably judge on Image 1, grounded in Image 2 and th
 Return strictly valid JSON matching the requested schema.
 """
 
-    candidate_models = [model_id, "gemini-3.5-flash-lite"]
+    candidate_models = list(dict.fromkeys([model_id, "gemini-3.5-flash-lite"]))
     last_err = None
 
-    for m_id in dict.fromkeys(candidate_models):
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=m_id,
-                    contents=[
-                        prompt,
-                        genai_types.Part.from_bytes(data=orig_bytes, mime_type=orig_mime),
-                        genai_types.Part.from_bytes(data=overlay_bytes, mime_type="image/png"),
-                    ],
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=VLMAuditResult,
-                        temperature=0.1,
-                    ),
-                )
-                return VLMAuditResult.model_validate_json(response.text).model_dump()
-            except Exception as exc:
-                last_err = exc
-                if "503" in str(exc) or "UNAVAILABLE" in str(exc):
-                    time.sleep(2.0 * (attempt + 1))
-                else:
-                    raise
+    for m_id in candidate_models:
+        try:
+            response = client.models.generate_content(
+                model=m_id,
+                contents=[
+                    prompt,
+                    genai_types.Part.from_bytes(data=orig_bytes, mime_type="image/jpeg"),
+                    genai_types.Part.from_bytes(data=overlay_bytes, mime_type="image/jpeg"),
+                ],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=VLMAuditResult,
+                    temperature=0.1,
+                ),
+            )
+            return VLMAuditResult.model_validate_json(response.text).model_dump()
+        except Exception as exc:
+            last_err = exc
+            if any(k in str(exc) for k in ("503", "UNAVAILABLE", "429", "DEADLINE", "timeout", "Timeout")):
+                continue
+            raise
 
-    raise RuntimeError(f"All Gemini models temporarily unavailable: {last_err}")
+    raise RuntimeError(f"Gemini VLM timed out or unavailable: {last_err}")
 
 
 def compute_hybrid_rubric(cv_report: Dict, vlm_dict: Optional[Dict]) -> Dict:
