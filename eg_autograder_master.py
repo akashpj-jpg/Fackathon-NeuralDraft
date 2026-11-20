@@ -14,7 +14,7 @@ Local Install (inside .venv):
 Launch Web App:
     streamlit run eg_autograder_master.py
 """
-
+import time
 import argparse
 import io
 import json
@@ -1076,20 +1076,34 @@ Inspect what OpenCV cannot reliably judge on Image 1, grounded in Image 2 and th
 Return strictly valid JSON matching the requested schema.
 """
 
-    response = client.models.generate_content(
-        model=model_id,
-        contents=[
-            prompt,
-            genai_types.Part.from_bytes(data=orig_bytes, mime_type=orig_mime),
-            genai_types.Part.from_bytes(data=overlay_bytes, mime_type="image/png"),
-        ],
-        config=genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=VLMAuditResult,
-            temperature=0.1,
-        ),
-    )
-    return VLMAuditResult.model_validate_json(response.text).model_dump()
+    candidate_models = [model_id, "gemini-3.5-flash-lite"]
+    last_err = None
+
+    for m_id in dict.fromkeys(candidate_models):
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=m_id,
+                    contents=[
+                        prompt,
+                        genai_types.Part.from_bytes(data=orig_bytes, mime_type=orig_mime),
+                        genai_types.Part.from_bytes(data=overlay_bytes, mime_type="image/png"),
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=VLMAuditResult,
+                        temperature=0.1,
+                    ),
+                )
+                return VLMAuditResult.model_validate_json(response.text).model_dump()
+            except Exception as exc:
+                last_err = exc
+                if "503" in str(exc) or "UNAVAILABLE" in str(exc):
+                    time.sleep(2.0 * (attempt + 1))
+                else:
+                    raise
+
+    raise RuntimeError(f"All Gemini models temporarily unavailable: {last_err}")
 
 
 def compute_hybrid_rubric(cv_report: Dict, vlm_dict: Optional[Dict]) -> Dict:
